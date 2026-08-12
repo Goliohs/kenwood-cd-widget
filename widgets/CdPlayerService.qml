@@ -85,6 +85,12 @@ Singleton {
         trackProc.running = true
     }
 
+    // Fetch full track metadata (titles from Discogs cache + track n)
+    function refreshTrackMeta() {
+        _trackMetaBuf = ""
+        trackMetaProc.running = true
+    }
+
     function _runCmd(subcmd) {
         cmdProc.command = ["bash", _script, subcmd]
         cmdProc.running = true
@@ -151,8 +157,10 @@ Singleton {
                     root.songAlbum = obj.album || ""
                 } catch (e) { /* keep last */ }
                 if (root.cdState !== prevCd) {
-                    if (root.cdState === "audio-cd") root.cdInserted()
-                    else root.cdRemoved()
+                    if (root.cdState === "audio-cd") {
+                        root.cdInserted()
+                        root.refreshTrackMeta()
+                    } else root.cdRemoved()
                 }
                 if (root.trackNum !== prevTrack) root.trackChanged(root.trackNum)
                 if (root.state !== prevState) root.playStateChanged(root.state)
@@ -184,6 +192,48 @@ Singleton {
         }
     }
 
+    // Process for full metadata (Discogs): artist/album/per-track titles + duration
+    property string _trackMetaBuf: ""
+    Process {
+        id: trackMetaProc
+        command: ["bash", _script, "tracks-json"]
+        stdout: SplitParser {
+            onRead: data => root._trackMetaBuf += data + "\n"
+        }
+        onRunningChanged: {
+            if (!running && root._trackMetaBuf.length > 0) {
+                try {
+                    var obj = JSON.parse(root._trackMetaBuf.trim().split("\n").filter(function(l){return l.startsWith("{")})[0])
+                    if (obj.meta && obj.meta.tracks) {
+                        var ts = obj.meta.tracks
+                        // Index by track number for widget lookup
+                        var items = []
+                        var count = obj.count || ts.length
+                        for (var i = 0; i < ts.length; i++) {
+                            var t = ts[i]
+                            if (!t.n) continue
+                            // Convert "mm:ss" duration → seconds (for sectors/sizes if needed)
+                            var parts = (t.duration || "0:00").split(":")
+                            var secs = parseInt(parts[0]) * 60 + (parseInt(parts[1]) || 0)
+                            items.push({
+                                n: t.n,
+                                title: t.title || ("Track " + (t.n < 10 ? "0" : "") + t.n),
+                                duration: t.duration || "",
+                                secs: secs
+                            })
+                        }
+                        root.tracks = items
+                        root.trackCount = count
+                        // Album-wide metadata if current track has been resolved yet
+                        if (obj.meta.artist && !root.songArtist)   root.songArtist = obj.meta.artist
+                        if (obj.meta.album  && !root.songAlbum)    root.songAlbum  = obj.meta.album
+                    }
+                } catch (e) { /* keep last */ }
+                root._trackMetaBuf = ""
+            }
+        }
+    }
+
     Process {
         id: cmdProc
         command: []
@@ -196,6 +246,7 @@ Singleton {
     Component.onCompleted: {
         root.refresh()
         root.refreshTrackList()
+        root.refreshTrackMeta()
         pollTimer.start()
         clockTimer.start()
         eqTimer.start()
@@ -222,7 +273,7 @@ Singleton {
         interval: 5000
         repeat: true
         running: true
-        onTriggered: root.refreshTrackList()
+        onTriggered: { root.refreshTrackList(); root.refreshTrackMeta() }
     }
 
     property var _eqSeed: 0
